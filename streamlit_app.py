@@ -87,6 +87,15 @@ with center_col:
         st.button(examples[2], on_click=set_example_topic, args=(examples[2],), key="example3")
     
     # Generate button
+
+    expected_time = st.slider(
+    "Estimated run time (minutes)",
+    min_value=1,
+    max_value=15,
+    value=5,
+    help="Optional estimate for a countdown progress bar"
+)
+
     run_button = st.button("🚀 Generate Leads", type="primary", use_container_width=True)
     
     # Add a small space
@@ -113,23 +122,73 @@ if 'pricing_tracker' not in st.session_state:
     st.session_state.pricing_tracker = ModelsPricing()
 
 # Update the run button section to preserve state
+# --- inside your existing code ---
+
+# Update the run button section to preserve state
 if run_button:
     if not industry or not country:
         st.error("Please enter an industry and country")
-    elif not os.environ.get("OPENAI_API_KEY"):
-        st.warning("⚠️ Please enter your OpenAI API key in the sidebar to continue")
+
+    # ✅ CHANGED: provider-specific API-key check
+    elif (config["provider"].lower() == "openai" and not os.environ.get("OPENAI_API_KEY")) \
+         or (config["provider"].lower() == "gemini" and not os.environ.get("GEMINI_API_KEY")):
+        st.warning(f"⚠️ Please enter your {config['provider']} API key in the sidebar to continue")
+
     else:
-        with st.status("🤖 Researching... This may take several minutes.", expanded=True) as status:
+        with st.status("🤖 Researching...", expanded=True) as status:
             try:
-                # Initialize the crew
-                lead_gen_crew = LeadGenerator().crew()
-                
-                # Run the crew with industry and country inputs
+                lead_gen_crew = LeadGenerator(
+                    provider=config["provider"],
+                    model=config["model"]
+                ).crew()
+
+                # Track cost for correct provider/model
+                st.session_state.pricing_tracker.set_model(
+                    config["provider"], config["model"]
+                )
+
+                # --- Two progress bars ---
+                countdown_bar = st.progress(0, text="Estimated time remaining")
+                pulse_bar = st.progress(0, text="Processing tasks…")
+
+                total_seconds = expected_time * 60
+                start_time = datetime.now()
+
+                # Background timer loop
+                def update_bars():
+                    while not st.session_state.get("crew_finished", False):
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        pct_time = min(int(elapsed / total_seconds * 100), 99)
+                        countdown_bar.progress(
+                            pct_time,
+                            text=f"Approx. {max(int(total_seconds - elapsed), 0)} s left"
+                        )
+                        # animate a pulsing bar (cycles 0→100)
+                        pulse = int((elapsed * 20) % 100)
+                        pulse_bar.progress(pulse, text="Processing tasks…")
+                        time.sleep(1)
+
+                # Run timer in a separate thread so UI keeps updating
+                import threading
+                threading.Thread(target=update_bars, daemon=True).start()
+
+                # Run the crew as usual (blocking call)
                 results = lead_gen_crew.kickoff(inputs={
                     "industry": industry,
                     "country": country
                 })
-                
+
+                # Mark finished and jump bars to 100%
+                st.session_state.crew_finished = True
+                countdown_bar.progress(100, text="Done")
+                pulse_bar.progress(100, text="All tasks completed")
+
+            except Exception as e:
+                st.session_state.crew_finished = True
+                status.update(label="❌ Error occurred", state="error")
+                st.error(f"An error occurred: {e}")
+                st.stop()
+
                 # Store results in session state immediately
                 st.session_state.results = results
                 status.update(label="✅ Lead generation completed!", state="complete", expanded=False)
